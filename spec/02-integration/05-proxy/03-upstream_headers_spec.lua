@@ -299,6 +299,25 @@ for _, strategy in helpers.each_strategy() do
         end)
       end)
 
+      describe("X-Forwarded-Path", function()
+        it("should be added if not present in request", function()
+          local headers = request_headers {
+            ["Host"] = "headers-inspect.com",
+          }
+
+          assert.equal("/", headers["x-forwarded-path"])
+        end)
+
+        it("should be replaced if present in request", function()
+          local headers = request_headers {
+            ["Host"]             = "headers-inspect.com",
+            ["X-Forwarded-Path"] = "/replaced",
+          }
+
+          assert.equal("/", headers["x-forwarded-path"])
+        end)
+      end)
+
       describe("X-Forwarded-Prefix", function()
         it("should be added if path was stripped", function()
           local headers = request_headers({}, "/foo/status/200")
