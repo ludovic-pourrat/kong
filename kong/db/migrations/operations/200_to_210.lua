@@ -5,11 +5,62 @@
 --
 -- If you want to reuse these operations in a future migration,
 -- copy the functions over to a new versioned module.
+
+
+local ngx = ngx
 local uuid = require "resty.jit-uuid"
 
 
 local function render(template, keys)
   return (template:gsub("$%(([A-Z_]+)%)", keys))
+end
+
+
+local function cassandra_get_default_ws(connector)
+  local rows, err = connector:query("SELECT id FROM workspaces WHERE name='default'")
+  if err then
+    return nil, err
+  end
+
+  if not rows
+     or not rows[1]
+     or not rows[1].id
+  then
+    return nil
+  end
+
+  return rows[1].id
+end
+
+
+local function cassandra_create_default_ws(connector)
+  local cql = render([[
+    INSERT INTO workspaces(id, name, created_at)
+    VALUES (uuid(), 'default', $(NOW))
+]], {
+    NOW = ngx.time() * 1000
+  })
+
+  local _, err = connector:query(cql)
+  if err then
+    return nil, err
+  end
+
+  return cassandra_get_default_ws(connector)
+end
+
+
+local function cassandra_ensure_default_ws(connector)
+  local default_ws, err = cassandra_get_default_ws(connector)
+  if err then
+    return nil, err
+  end
+
+  if default_ws then
+    return default_ws
+  end
+
+  return cassandra_create_default_ws(connector)
 end
 
 
@@ -241,7 +292,7 @@ local cassandra = {
     -- Add `workspaces` table.
     -- @return string: CQL
     ws_add_workspaces = function(_)
-      return render([[
+      return [[
 
           CREATE TABLE IF NOT EXISTS workspaces(
             id         uuid,
@@ -252,14 +303,10 @@ local cassandra = {
             config     text,
             PRIMARY KEY (id)
           );
+
           CREATE INDEX IF NOT EXISTS workspaces_name_idx ON workspaces(name);
 
-          -- Create default workspace
-          INSERT INTO workspaces(id, name, created_at)
-          VALUES (uuid(), 'default', $(NOW));
-      ]], {
-        NOW = ngx.time() * 1000
-      })
+      ]]
     end,
 
     ----------------------------------------------------------------------------
@@ -314,15 +361,15 @@ local cassandra = {
     ------------------------------------------------------------------------------
     -- Update composite cache keys to workspace-aware formats
     ws_update_composite_cache_key = function(_, connector, table_name, is_partitioned)
-      local rows, err = connector:query([[
-        SELECT id FROM workspaces WHERE name='default';
-      ]])
+      local coordinator = assert(connector:connect_migrations())
+      local default_ws, err = cassandra_ensure_default_ws(connector)
       if err then
         return nil, err
       end
-      local default_ws = rows[1].id
 
-      local coordinator = assert(connector:connect_migrations())
+      if not default_ws then
+        return nil, "unable to find a default workspace"
+      end
 
       for rows, err in coordinator:iterate("SELECT id, cache_key FROM " .. table_name) do
         if err then
@@ -357,16 +404,15 @@ local cassandra = {
     ------------------------------------------------------------------------------
     -- Update keys to workspace-aware formats
     ws_update_keys = function(_, connector, table_name, unique_keys, is_partitioned)
-
-      local rows, err = connector:query([[
-        SELECT id FROM workspaces WHERE name='default';
-      ]])
+      local coordinator = assert(connector:connect_migrations())
+      local default_ws, err = cassandra_ensure_default_ws(connector)
       if err then
         return nil, err
       end
-      local default_ws = rows[1].id
 
-      local coordinator = assert(connector:connect_migrations())
+      if not default_ws then
+        return nil, "unable to find a default workspace"
+      end
 
       for rows, err in coordinator:iterate("SELECT * FROM " .. table_name) do
         if err then
